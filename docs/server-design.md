@@ -397,8 +397,10 @@ R1–R7 (§0.1) are decided and not asked again.
 
 ## 13. The owner's answers
 
-_(awaiting)_
+2026-10-17 — **S1 the repository `maluos-local-llm-server`** (the owner's name kept), **S2–S11 the recommendations**, **S12 public**.
+Every decision in §12 stands as recommended. The design is approved.
 
 ## 14. State
 
-2026-10-16 — designed; nothing built. Local repository `~/maluos-local-llm-server` (no origin yet).
+2026-10-16 — designed. 2026-10-17 — **APPROVED by the owner** (§13). Nothing built. Local repository `~/maluos-local-llm-server`; the
+GitHub repository `github.com/maludb/maluos-local-llm-server` (public) is the owner's to create before step 1 (§10).
