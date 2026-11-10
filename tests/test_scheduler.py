@@ -170,9 +170,8 @@ async def test_refusals(node):
             await node.submit(k, model, nodef)
         assert (e.value.status, e.value.code) == (status, code), model
     _, nc = await node.mint("nocloud")
-    with pytest.raises(Refusal) as e:
-        await node.submit(nc, "big-cloud")
-    assert e.value.code == "cloud_not_allowed"
+    j = await node.submit(nc, "big-cloud")
+    assert j["lane_served"] == "cloud", "a cloud model is served like a local one: no key flag gates it (estate-node-plan P3)"
     _, capped = await node.mint("capped", max_priority=3)
     j = await node.submit(capped, "local-a", {"priority": 9})
     assert j["priority"] == 3, "priority clamped to the key's cap"

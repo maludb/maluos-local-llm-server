@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS runs (
     seq INTEGER NOT NULL,
     face TEXT NOT NULL,
     mode TEXT NOT NULL DEFAULT 'sync',
-    kind TEXT NOT NULL DEFAULT 'chat' CHECK (kind IN ('chat', 'embed', 'load', 'pull', 'delete')),
+    kind TEXT NOT NULL DEFAULT 'chat' CHECK (kind IN ('chat', 'generate', 'embed', 'load', 'pull', 'delete')),
     key_id TEXT,
     key_name TEXT,
     tags TEXT NOT NULL DEFAULT '[]',
@@ -342,7 +342,7 @@ class Store:
 
     async def expected_ms(self, model: str, default_ms: int, default_load_ms: int) -> tuple[int, int]:
         """(median total_ms of the model's last 20 done runs, median load_ms of those that loaded) — the expected duration (§3)."""
-        rows = await self.fetchall("SELECT total_backend_ms AS t, load_ms AS l, model_was_loaded AS w FROM runs WHERE served_model = ? AND status = 'done' AND kind = 'chat' "
+        rows = await self.fetchall("SELECT total_backend_ms AS t, load_ms AS l, model_was_loaded AS w FROM runs WHERE served_model = ? AND status = 'done' AND kind IN ('chat', 'generate') "
                                    "AND total_backend_ms IS NOT NULL ORDER BY finished_at DESC LIMIT 20", (model,))
         if not rows:
             return default_ms, default_load_ms
@@ -497,7 +497,7 @@ class Store:
         groups = {"key": "key_name", "model": "served_model", "lane": "lane_served", "day": "substr(accepted_at, 1, 10)",
                   "hour": "substr(accepted_at, 1, 13)", "tag": "tags"}
         g = groups.get(group_by, "key_name")
-        where, params = ["kind IN ('chat','embed')"], []
+        where, params = ["kind IN ('chat','generate','embed')"], []
         if from_:
             where.append("accepted_at >= ?"); params.append(from_)
         if to:

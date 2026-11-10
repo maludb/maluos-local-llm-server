@@ -28,6 +28,7 @@ class Backend:
     async def show(self, model: str) -> dict: raise NotImplementedError
     async def loaded(self) -> list[dict]: raise NotImplementedError
     def chat(self, request: dict) -> AsyncIterator[dict]: raise NotImplementedError
+    def generate(self, request: dict) -> AsyncIterator[dict]: raise NotImplementedError
     async def embed(self, request: dict) -> dict: raise NotImplementedError
     def pull(self, model: str) -> AsyncIterator[dict]: raise NotImplementedError
     async def delete(self, model: str) -> None: raise NotImplementedError

@@ -15,6 +15,7 @@ from .backends.base import Backend, BackendError, ModelMissing
 from .store import Store, now_iso, parse_iso
 
 LANES = ("local", "cloud", "maintenance")
+INFER = ("chat", "generate")           # the kinds that stream a model's answer
 PRIORITY_DEFAULT = 5
 
 
@@ -53,6 +54,7 @@ class Scheduler:
         self._loaded_cache: tuple[float, set[str]] = (0.0, set())
         self.listeners: list[asyncio.Queue] = []            # node events for /events
         self.ended: dict[str, asyncio.Event] = {}           # set when a job leaves queued/running
+        self.requests: dict[str, dict] = {}                 # a queued or running job's request body: memory only, whatever the retention
 
     # -- lifecycle --------------------------------------------------------------------------------------------------------------
     async def start(self) -> None:
@@ -62,6 +64,11 @@ class Scheduler:
             self.lanes[r["lane_served"]].running.discard(r["id"])
             await self.store.update_run(r["id"], {"status": "failed", "finished_at": now_iso(), "error_code": "node_restarted",
                                                    "error_text": "the node restarted while this job ran"}, ("failed", {"code": "node_restarted"}))
+        # a queued job's request lived in memory (it is stored only under `full` retention): without it the job cannot run
+        for r in await self.store.queued():
+            if r["kind"] in INFER + ("embed",) and not ((await self.store.payload(r["id"])) or {}).get("request"):
+                await self.store.update_run(r["id"], {"status": "failed", "finished_at": now_iso(), "error_code": "node_restarted",
+                                                       "error_text": "the node restarted while this job waited"}, ("failed", {"code": "node_restarted"}))
         self._loop_task = asyncio.create_task(self._loop())
 
     async def stop(self) -> None:
@@ -124,8 +131,7 @@ class Scheduler:
         if key.get("allowed_models") and model["name"] not in key["allowed_models"] and request.get("model") not in key["allowed_models"]:
             raise Refusal(403, "model_not_allowed", f"this key may not use {model['name']}")
         lane = model["lane_override"] or model["lane"]
-        if lane == "cloud" and not key["cloud_allowed"]:
-            raise Refusal(403, "cloud_not_allowed", "this key may not run in the cloud lane")
+        # a cloud model is served like a local one (docs/estate-node-plan.md P3): `cloud_allowed` gates a fallback only
         if await self.store.in_flight_for_key(key["id"]) >= int(key["max_concurrent"]):
             raise Refusal(429, "too_many_in_flight", f"this key has {key['max_concurrent']} jobs in flight", retry_after=5)
         if key.get("daily_token_cap") and await self.store.tokens_today(key["id"]) >= int(key["daily_token_cap"]):
@@ -180,6 +186,7 @@ class Scheduler:
             "webhook_url": node.get("webhook_url"),
         }
         self._ended(job["id"])
+        self.requests[job["id"]] = request
         await self.store.insert_run(job)
         await self.store.add_event(job["id"], "queued", {"lane": lane, "priority": priority})
         await self.store.store_payload(job["id"], key["payload_retention"], request=request)
@@ -238,7 +245,7 @@ class Scheduler:
         group = await self.store.fetchall("SELECT * FROM runs WHERE status = 'queued' AND lane_served = ? AND priority = ? ORDER BY accepted_at, seq LIMIT 50",
                                           (lane.name, top["priority"]))
         chosen = min(group, key=lambda r: (self.last_served.get(r["key_id"] or "", 0.0), r["accepted_at"], r["seq"]))
-        if lane.name == "local" and chosen["kind"] == "chat":
+        if lane.name == "local" and chosen["kind"] in INFER:
             loaded = await self.loaded_models()
             if chosen["served_model"] not in loaded and loaded:
                 window = await self.store.fetchall("SELECT * FROM runs WHERE status = 'queued' AND lane_served = ? ORDER BY priority DESC, accepted_at, seq LIMIT ?",
@@ -246,7 +253,7 @@ class Scheduler:
                 oldest_age = time.time() - (parse_iso(window[0]["accepted_at"]) or time.time())
                 if oldest_age < int(self.setting("affinity_window_seconds")):
                     for r in window:
-                        if r["kind"] == "chat" and r["served_model"] in loaded:
+                        if r["kind"] in INFER and r["served_model"] in loaded:
                             return r
         return chosen
 
@@ -345,13 +352,12 @@ class Scheduler:
         first_at = None
         try:
             async with asyncio.timeout(int(job["max_run_seconds"] or self.setting("max_run_seconds"))):
-                if job["kind"] == "chat":
-                    payload = await self.store.payload(jid)
-                    request = dict((payload or {}).get("request") or {})
+                if job["kind"] in INFER:
+                    request = dict(self.requests.get(jid) or ((await self.store.payload(jid)) or {}).get("request") or {})
                     request["model"] = job["served_model"]
                     request["keep_alive"] = job["keep_alive"]
                     final = None
-                    async for chunk in self.backend.chat(request):
+                    async for chunk in (self.backend.generate(request) if job["kind"] == "generate" else self.backend.chat(request)):
                         if chunk["type"] == "delta":
                             if first is None:
                                 first = time.monotonic()
@@ -374,18 +380,19 @@ class Scheduler:
                                "model_was_loaded": int((st.get("load_ms") or 0) < 50), "context_used": p_tok + out_tok,
                                "response_bytes": len(json.dumps(final.get("message") or {})), "http_status": 200}
                     await self.store.store_payload(jid, await self._retention(job), response=final.get("message"), chunks=self.chunks[jid])
-                    self.chunks[jid].append({"type": "final", "stop_reason": final.get("stop_reason"), "stats": st, "message": final.get("message")})
+                    self.chunks[jid].append({"type": "final", "stop_reason": final.get("stop_reason"), "stats": st, "message": final.get("message"), "raw": final.get("raw")})
                     self._publish(jid, self.chunks[jid][-1])
                 elif job["kind"] == "embed":
-                    payload = await self.store.payload(jid)
-                    request = dict((payload or {}).get("request") or {})
+                    request = dict(self.requests.get(jid) or ((await self.store.payload(jid)) or {}).get("request") or {})
                     request["model"] = job["served_model"]
+                    if job["keep_alive"] is not None:
+                        request["keep_alive"] = job["keep_alive"]
                     res = await self.backend.embed(request)
                     st = res.get("stats") or {}
                     outcome = {"stop_reason": "stop", "prompt_tokens": st.get("prompt_tokens"), "total_backend_ms": st.get("total_ms"),
                                "response_bytes": len(json.dumps(res.get("embeddings") or [])), "http_status": 200}
                     await self.store.store_payload(jid, await self._retention(job), response={"embeddings": res.get("embeddings")})
-                    self._publish(jid, {"type": "final", "embeddings": res.get("embeddings"), "stats": st})
+                    self._publish(jid, {"type": "final", "embeddings": res.get("embeddings"), "stats": st, "raw": res.get("raw")})
                 elif job["kind"] == "load":
                     res = await self.backend.load(job["served_model"], job["keep_alive"])
                     outcome = {"load_ms": res.get("load_ms"), "total_backend_ms": res.get("load_ms"), "http_status": 200}
@@ -459,7 +466,9 @@ class Scheduler:
             p = await self.store.payload(job_id)
             for c in (p or {}).get("chunks") or []:
                 yield c
-            if job["status"] == "done" and p and p.get("response") is not None:
+            if job["status"] == "done" and job["kind"] == "embed" and p and p.get("response") is not None:
+                yield {"type": "final", "embeddings": p["response"].get("embeddings"), "stats": self._stats_of(job)}
+            elif job["status"] == "done" and p and p.get("response") is not None:
                 yield {"type": "final", "stop_reason": job["stop_reason"], "message": p["response"], "stats": self._stats_of(job)}
             elif job["status"] != "done":
                 yield {"type": "error", "code": job["error_code"], "text": job["error_text"], "status": job["status"]}
@@ -482,6 +491,7 @@ class Scheduler:
     def _finish_subscribers(self, job_id: str) -> None:
         for q in self.subscribers.pop(job_id, []):
             q.put_nowait(None)
+        self.requests.pop(job_id, None)
         self._ended(job_id).set()
 
     def _ended(self, job_id: str) -> asyncio.Event:

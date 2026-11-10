@@ -7,7 +7,8 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+# Where config/ and data/ live: SLLM_HOME for an installed node, the checkout for a development one.
+ROOT = Path(os.environ.get("SLLM_HOME") or Path(__file__).resolve().parent.parent)
 
 # The settings the manager may PATCH (design §6.6), with their defaults. Types are enforced by `coerce_setting`.
 SETTING_DEFAULTS: dict[str, object] = {
@@ -63,11 +64,20 @@ def coerce_setting(key: str, value) -> object:
 @dataclass
 class NodeConfig:
     port: int = 11435
-    bind: str = "0.0.0.0"
+    bind: str = "127.0.0.1"          # loopback until the node joins an estate or the operator exposes it; never without a key
     backend_url: str = "http://127.0.0.1:11434"
     backend_kind: str = "ollama"
     data_dir: Path = field(default_factory=lambda: ROOT / "data")
     name: str = "node"
+    socket: Path | None = None       # the operator's socket (the CLI, no key); default data_dir/sllm.sock, inside a 0700 directory
+
+    @property
+    def socket_path(self) -> Path:
+        return Path(self.socket) if self.socket else self.data_dir / "sllm.sock"
+
+    @property
+    def path(self) -> Path:
+        return Path(os.environ.get("SLLM_CONFIG", ROOT / "config" / "node.toml"))
 
     @classmethod
     def load(cls, path: Path | None = None) -> "NodeConfig":
@@ -84,4 +94,6 @@ class NodeConfig:
         cfg.backend_kind = raw.get("backend_kind", cfg.backend_kind)
         cfg.data_dir = Path(os.environ.get("SLLM_DATA_DIR", raw.get("data_dir", cfg.data_dir)))
         cfg.name = raw.get("name", cfg.name)
+        sock = os.environ.get("SLLM_SOCKET", raw.get("socket"))
+        cfg.socket = Path(sock) if sock else None
         return cfg

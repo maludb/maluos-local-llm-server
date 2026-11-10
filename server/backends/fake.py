@@ -72,7 +72,7 @@ class FakeBackend(Backend):
                     self._loaded = {model: time.monotonic()}      # one local model's worth of memory
             n = spec.get("tokens", 10)
             token_ms = spec.get("token_ms", 20)
-            prompt_tokens = sum(len(str(m.get("content", ""))) // 4 + 1 for m in request.get("messages", []))
+            prompt_tokens = sum(len(str(m.get("content", ""))) // 4 + 1 for m in request.get("messages") or [])
             prompt_ms = prompt_tokens * 2
             await asyncio.sleep(prompt_ms / 1000 * self.speed)
             text = []
@@ -89,6 +89,10 @@ class FakeBackend(Backend):
         finally:
             self.in_flight -= 1
             self.in_flight_by_lane[lane] -= 1
+
+    def generate(self, request: dict) -> AsyncIterator[dict]:
+        """A completion: the same stream as a chat, the prompt counted as one message."""
+        return self.chat({**request, "messages": [{"role": "user", "content": request.get("prompt", "")}]})
 
     async def embed(self, request: dict) -> dict:
         model = request["model"]
